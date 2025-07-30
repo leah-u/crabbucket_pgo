@@ -2,6 +2,8 @@ import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/otp/actor
 import gleam/result
+import gleam/time/duration.{type Duration}
+import gleam/time/timestamp.{type Timestamp}
 import pog.{type Connection}
 
 // These need to be separate statements for pog.execute()
@@ -11,7 +13,7 @@ pub const schema_migration_sql = "CREATE SCHEMA IF NOT EXISTS crabbucket;"
 pub const table_migration_sql = "
 CREATE UNLOGGED TABLE IF NOT EXISTS crabbucket.token_buckets (
     id TEXT PRIMARY KEY,
-    window_end BIGINT NOT NULL,
+    window_end TIMESTAMP NOT NULL,
     remaining_tokens INT NOT NULL
 );
 "
@@ -21,19 +23,12 @@ CREATE INDEX IF NOT EXISTS IX_token_bucket_window_end
 ON crabbucket.token_buckets (window_end);
 "
 
-@external(erlang, "os", "system_time")
-fn system_time(second_division: Int) -> Int
-
-fn now_ms() -> Int {
-  system_time(1000)
-}
-
 pub type RemainingTokenCountSuccess {
-  HasRemainingTokens(remaining_tokens: Int, next_reset_timestamp: Int)
+  HasRemainingTokens(remaining_tokens: Int, next_reset: Timestamp)
 }
 
 pub type RemainingTokenCountFailure {
-  MustWaitUntil(next_reset_timestamp: Int)
+  MustWaitUntil(next_reset: Timestamp)
   PogError(error: pog.QueryError)
 }
 
@@ -60,7 +55,7 @@ pub type RemainingTokenCountFailure {
 pub fn remaining_tokens_for_key(
   conn: Connection,
   key: String,
-  window_duration_ms: Int,
+  window_duration: Duration,
   default_tokens: Int,
 ) -> Result(RemainingTokenCountSuccess, RemainingTokenCountFailure) {
   let sql =
@@ -84,18 +79,18 @@ pub fn remaining_tokens_for_key(
       RETURNING tb.remaining_tokens, tb.window_end;
     "
 
-  let window_start = now_ms()
-  let window_end = window_start + window_duration_ms
+  let window_start = timestamp.system_time()
+  let window_end = timestamp.add(window_start, window_duration)
 
   use response <- result.try({
     pog.query(sql)
     |> pog.parameter(pog.text(key))
-    |> pog.parameter(pog.int(window_start))
-    |> pog.parameter(pog.int(window_end))
+    |> pog.parameter(pog.timestamp(window_start))
+    |> pog.parameter(pog.timestamp(window_end))
     |> pog.parameter(pog.int(default_tokens - 1))
     |> pog.returning({
       use remaining_tokens <- decode.field(0, decode.int)
-      use window_end <- decode.field(1, decode.int)
+      use window_end <- decode.field(1, pog.timestamp_decoder())
       decode.success(#(remaining_tokens, window_end))
     })
     |> pog.execute(conn)
@@ -133,7 +128,7 @@ fn handle_cleaner_message(
           DO
           $$
           DECLARE
-              now_ms BIGINT := EXTRACT(EPOCH FROM NOW()) * 1000;
+              now_ms TIMESTAMP := (NOW() AT TIME ZONE 'UTC');
               max_iterations INT := 10;
               total_count BIGINT;
               iterations INT;

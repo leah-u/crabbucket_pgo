@@ -4,6 +4,7 @@ import gleam/list
 import gleam/option.{Some}
 import gleam/otp/actor
 import gleam/result
+import gleam/time/duration
 import gleeunit
 import gleeunit/should
 import pog
@@ -35,38 +36,23 @@ pub fn main() {
 
 pub fn insert_test() {
   let db = get_db()
-  let window_duration_ms = 60 * 1000
+  let window_duration = duration.minutes(1)
   let default_remaining_tokens = 2
   let key = "test entry"
 
   let HasRemainingTokens(remaining1, _) =
-    remaining_tokens_for_key(
-      db,
-      key,
-      window_duration_ms,
-      default_remaining_tokens,
-    )
+    remaining_tokens_for_key(db, key, window_duration, default_remaining_tokens)
     |> should.be_ok()
   remaining1
   |> should.equal(default_remaining_tokens - 1)
 
   let HasRemainingTokens(remaining2, _) =
-    remaining_tokens_for_key(
-      db,
-      key,
-      window_duration_ms,
-      default_remaining_tokens,
-    )
+    remaining_tokens_for_key(db, key, window_duration, default_remaining_tokens)
     |> should.be_ok()
   remaining2
   |> should.equal(default_remaining_tokens - 2)
 
-  remaining_tokens_for_key(
-    db,
-    key,
-    window_duration_ms,
-    default_remaining_tokens,
-  )
+  remaining_tokens_for_key(db, key, window_duration, default_remaining_tokens)
   |> should.be_error()
 
   Nil
@@ -74,38 +60,23 @@ pub fn insert_test() {
 
 pub fn expiration_test() {
   let db = get_db()
-  let window_duration_ms = 1000
+  let window_duration = duration.seconds(1)
   let default_remaining_tokens = 1
   let key = "test entry 2"
 
   let HasRemainingTokens(remaining1, _) =
-    remaining_tokens_for_key(
-      db,
-      key,
-      window_duration_ms,
-      default_remaining_tokens,
-    )
+    remaining_tokens_for_key(db, key, window_duration, default_remaining_tokens)
     |> should.be_ok()
   remaining1
   |> should.equal(default_remaining_tokens - 1)
 
-  remaining_tokens_for_key(
-    db,
-    key,
-    window_duration_ms,
-    default_remaining_tokens,
-  )
+  remaining_tokens_for_key(db, key, window_duration, default_remaining_tokens)
   |> should.be_error()
 
   process.sleep(1000)
 
   let HasRemainingTokens(remaining1, _) =
-    remaining_tokens_for_key(
-      db,
-      key,
-      window_duration_ms,
-      default_remaining_tokens,
-    )
+    remaining_tokens_for_key(db, key, window_duration, default_remaining_tokens)
     |> should.be_ok()
   remaining1
   |> should.equal(default_remaining_tokens - 1)
@@ -113,7 +84,7 @@ pub fn expiration_test() {
 
 pub fn atomic_stress_test() {
   let db = get_db()
-  let window_duration_ms = 60 * 1000
+  let window_duration = duration.minutes(1)
   let default_remaining_tokens = 100
   let key = "test entry 3"
 
@@ -127,7 +98,7 @@ pub fn atomic_stress_test() {
           remaining_tokens_for_key(
             db,
             key,
-            window_duration_ms,
+            window_duration,
             default_remaining_tokens,
           ),
         )
@@ -147,17 +118,12 @@ pub fn atomic_stress_test() {
 
 pub fn cleaner_test() {
   let db = get_db()
-  let window_duration_ms = 1000
+  let window_duration = duration.seconds(1)
   let default_remaining_tokens = 100
   let key = "test entry 4"
 
   let HasRemainingTokens(remaining, _) =
-    remaining_tokens_for_key(
-      db,
-      key,
-      window_duration_ms,
-      default_remaining_tokens,
-    )
+    remaining_tokens_for_key(db, key, window_duration, default_remaining_tokens)
     |> should.be_ok()
   remaining
   |> should.equal(default_remaining_tokens - 1)

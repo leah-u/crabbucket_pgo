@@ -1,11 +1,10 @@
-import gleam/dynamic
-import gleam/erlang/process.{type Subject}
-import gleam/io
+import gleam/dynamic/decode
+import gleam/erlang/process
 import gleam/otp/actor
-import gleam/pgo.{type Connection}
 import gleam/result
+import pog.{type Connection}
 
-// These need to be separate statements for pgo.execute()
+// These need to be separate statements for pog.execute()
 
 pub const schema_migration_sql = "CREATE SCHEMA IF NOT EXISTS crabbucket;"
 
@@ -35,7 +34,7 @@ pub type RemainingTokenCountSuccess {
 
 pub type RemainingTokenCountFailure {
   MustWaitUntil(next_reset_timestamp: Int)
-  PgoError(error: pgo.QueryError)
+  PogError(error: pog.QueryError)
 }
 
 /// Takes an arbitrary key and window duration, inserting a record if non-existing.
@@ -89,18 +88,18 @@ pub fn remaining_tokens_for_key(
   let window_end = window_start + window_duration_ms
 
   use response <- result.try({
-    pgo.execute(
-      sql,
-      conn,
-      [
-        key |> pgo.text(),
-        window_start |> pgo.int(),
-        window_end |> pgo.int(),
-        default_tokens - 1 |> pgo.int(),
-      ],
-      dynamic.tuple2(dynamic.int, dynamic.int),
-    )
-    |> result.map_error(fn(e) { PgoError(e) })
+    pog.query(sql)
+    |> pog.parameter(pog.text(key))
+    |> pog.parameter(pog.int(window_start))
+    |> pog.parameter(pog.int(window_end))
+    |> pog.parameter(pog.int(default_tokens - 1))
+    |> pog.returning({
+      use remaining_tokens <- decode.field(0, decode.int)
+      use window_end <- decode.field(1, decode.int)
+      decode.success(#(remaining_tokens, window_end))
+    })
+    |> pog.execute(conn)
+    |> result.map_error(fn(e) { PogError(e) })
   })
 
   let assert [#(remaining_tokens, window_end)] = response.rows
@@ -111,33 +110,24 @@ pub fn remaining_tokens_for_key(
   }
 }
 
-pub type TokenBucketCleanerMessage(msg) {
-  ShutdownTokenBucketCleaner
-  StartTokenBucketCleaner(Subject(TokenBucketCleanerMessage(msg)))
-  RunTokenBucketCleaner(Subject(TokenBucketCleanerMessage(msg)))
+pub opaque type TokenBucketCleanerMessage {
+  RunTokenBucketCleaner
 }
 
-pub type TokenBucketCleanerState(key) {
-  TokenBucketCleanerState(conn: Connection, sweep_interval_ms: Int)
+type TokenBucketCleanerState(key) {
+  TokenBucketCleanerState(
+    conn: Connection,
+    sweep_interval_ms: Int,
+    subject: process.Subject(TokenBucketCleanerMessage),
+  )
 }
 
-pub fn handle_cleaner_message(
-  message: TokenBucketCleanerMessage(msg),
+fn handle_cleaner_message(
   state: TokenBucketCleanerState(key),
-) -> actor.Next(TokenBucketCleanerMessage(msg), TokenBucketCleanerState(key)) {
+  message: TokenBucketCleanerMessage,
+) -> actor.Next(TokenBucketCleanerState(key), TokenBucketCleanerMessage) {
   case message {
-    ShutdownTokenBucketCleaner -> actor.Stop(process.Normal)
-
-    StartTokenBucketCleaner(subject) -> {
-      process.send_after(
-        subject,
-        state.sweep_interval_ms,
-        RunTokenBucketCleaner(subject),
-      )
-      actor.continue(state)
-    }
-
-    RunTokenBucketCleaner(subject) -> {
+    RunTokenBucketCleaner -> {
       let sql =
         "
           DO
@@ -171,20 +161,17 @@ pub fn handle_cleaner_message(
           $$;
         "
 
-      let response = pgo.execute(sql, state.conn, [], dynamic.dynamic)
+      let response = pog.query(sql) |> pog.execute(state.conn)
 
       case response {
-        Error(e) -> {
-          io.debug(e)
-          Nil
-        }
+        Error(e) -> process.send_abnormal_exit(process.self(), e)
         _ -> Nil
       }
 
       process.send_after(
-        subject,
+        state.subject,
         state.sweep_interval_ms,
-        RunTokenBucketCleaner(subject),
+        RunTokenBucketCleaner,
       )
       actor.continue(state)
     }
@@ -203,12 +190,19 @@ pub fn handle_cleaner_message(
 /// contention in the database, and is hard-coded to only delete up to
 /// 10 segments (10,000 records) at a time,
 /// to avoid holding onto a pool connection for too long.
-pub fn create_and_start_cleaner(conn: Connection, sweep_interval_ms: Int) {
-  let assert Ok(cleaner) =
-    actor.start(
-      TokenBucketCleanerState(conn: conn, sweep_interval_ms: sweep_interval_ms),
-      handle_cleaner_message,
+pub fn create_and_start_cleaner(
+  conn: Connection,
+  sweep_interval_ms: Int,
+) -> Result(actor.Started(Nil), actor.StartError) {
+  actor.new_with_initialiser(100, fn(subject) {
+    let state = TokenBucketCleanerState(conn:, sweep_interval_ms:, subject:)
+    process.send_after(
+      state.subject,
+      state.sweep_interval_ms,
+      RunTokenBucketCleaner,
     )
-  actor.send(cleaner, StartTokenBucketCleaner(cleaner))
-  cleaner
+    Ok(actor.initialised(state))
+  })
+  |> actor.on_message(handle_cleaner_message)
+  |> actor.start
 }

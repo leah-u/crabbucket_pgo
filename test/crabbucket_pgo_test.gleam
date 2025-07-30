@@ -1,33 +1,31 @@
 import crabbucket/pgo.{HasRemainingTokens, remaining_tokens_for_key} as crabbucket
-import gleam/dynamic
 import gleam/erlang/process
 import gleam/list
 import gleam/option.{Some}
-import gleam/otp/task
-import gleam/pgo
+import gleam/otp/actor
 import gleam/result
 import gleeunit
 import gleeunit/should
+import pog
 
 fn get_db() {
-  let db =
-    pgo.connect(
-      pgo.Config(
-        ..pgo.default_config(),
-        host: "127.0.0.1",
-        user: "postgres",
-        password: Some("postgres"),
-        database: "crabbucket_test",
-        pool_size: 15,
-      ),
-    )
+  let name = process.new_name("db")
+  let assert Ok(actor.Started(_pid, db)) =
+    pog.default_config(name)
+    |> pog.host("127.0.0.1")
+    |> pog.user("postgres")
+    |> pog.password(Some("postgres"))
+    |> pog.database("crabbucket_test")
+    |> pog.pool_size(15)
+    |> pog.start
 
   let assert Ok(_) =
-    pgo.execute(crabbucket.schema_migration_sql, db, [], dynamic.dynamic)
+    pog.query(crabbucket.schema_migration_sql) |> pog.execute(db)
   let assert Ok(_) =
-    pgo.execute(crabbucket.table_migration_sql, db, [], dynamic.dynamic)
+    pog.query(crabbucket.table_migration_sql) |> pog.execute(db)
   let assert Ok(_) =
-    pgo.execute(crabbucket.index_migration_sql, db, [], dynamic.dynamic)
+    pog.query(crabbucket.index_migration_sql) |> pog.execute(db)
+
   db
 }
 
@@ -122,16 +120,21 @@ pub fn atomic_stress_test() {
   let results =
     list.range(1, 500)
     |> list.map(fn(_) {
-      task.async(fn() {
-        remaining_tokens_for_key(
-          db,
-          key,
-          window_duration_ms,
-          default_remaining_tokens,
+      let subject = process.new_subject()
+      process.spawn(fn() {
+        process.send(
+          subject,
+          remaining_tokens_for_key(
+            db,
+            key,
+            window_duration_ms,
+            default_remaining_tokens,
+          ),
         )
       })
+      subject
     })
-    |> list.map(task.await_forever)
+    |> list.map(process.receive_forever)
 
   results
   |> list.count(fn(res) { result.is_ok(res) })
@@ -164,12 +167,9 @@ pub fn cleaner_test() {
   process.sleep(2000)
 
   let assert Ok(response) =
-    pgo.execute(
-      "SELECT NULL FROM crabbucket.token_buckets WHERE id = $1",
-      db,
-      [key |> pgo.text()],
-      dynamic.dynamic,
-    )
+    pog.query("SELECT NULL FROM crabbucket.token_buckets WHERE id = $1")
+    |> pog.parameter(pog.text(key))
+    |> pog.execute(db)
 
   response.rows
   |> should.equal([])
